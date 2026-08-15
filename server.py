@@ -16,6 +16,7 @@ UPSTASH_URL = os.environ.get("UPSTASH_REDIS_REST_URL")
 UPSTASH_TOKEN = os.environ.get("UPSTASH_REDIS_REST_TOKEN")
 JOURNAL_KEY = "jerry_journal"
 JOURNAL_MAX_ENTRIES = 300
+STRATEGY_NOTES_KEY = "jerry_strategy_notes"
 
 mcp = MCPServer("polygon-options-flow")
 
@@ -233,6 +234,51 @@ async def journal_read(limit: int = 20) -> dict:
         (raw,) = await _upstash_pipeline(client, [["LRANGE", JOURNAL_KEY, str(-limit), "-1"]])
     entries = [json.loads(e) for e in (raw or [])]
     return {"count": len(entries), "entries": entries}
+
+
+@mcp.tool()
+async def strategy_notes_write(notes: str) -> dict:
+    """Overwrite Jerry's distilled strategy notes — the compact, standing summary
+    of what's been learned across all past trades so far.
+
+    Unlike the journal (an append-only log of every run's raw reasoning, which
+    grows long and must be re-read/re-derived each time), this is a single
+    short document that each run REPLACES with an updated version. It should
+    hold things like: total closed trades and win rate, average return broken
+    down by contract structure (moneyness/delta bucket, days-to-expiration),
+    which signals (e.g. the put/call-ratio) have been validated or invalidated
+    and by how much evidence, and the current best hypothesis to test next.
+
+    Call this whenever a run reaches a new conclusion worth carrying forward —
+    typically right after a position closes (stop-loss, trailing-exit, or
+    expiration) and its outcome updates the evidence base. Keep it compact
+    (aim under ~500 words) — this replaces the previous notes entirely, it
+    does not append to them. Always still call journal_write as before; this
+    is a supplement for fast/structured recall, not a replacement for the
+    journal's detailed run-by-run log.
+
+    Args:
+        notes: The full replacement text of the strategy notes.
+    """
+    async with httpx.AsyncClient() as client:
+        await _upstash_pipeline(client, [["SET", STRATEGY_NOTES_KEY, notes]])
+    return {"status": "recorded", "notes": notes}
+
+
+@mcp.tool()
+async def strategy_notes_read() -> dict:
+    """Read Jerry's distilled strategy notes — the compact, standing summary of
+    what's been learned across all past trades.
+
+    Call this FIRST at the start of every run, before journal_read. It's a
+    fast, structured shortcut to "what has this account learned so far" so
+    the run doesn't have to re-derive patterns from scratch by scanning the
+    raw journal every time. Use journal_read afterward for the detailed
+    reasoning behind the most recent runs specifically.
+    """
+    async with httpx.AsyncClient() as client:
+        (raw,) = await _upstash_pipeline(client, [["GET", STRATEGY_NOTES_KEY]])
+    return {"notes": raw}
 
 
 if __name__ == "__main__":
