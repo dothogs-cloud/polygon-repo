@@ -182,6 +182,7 @@ async def journal_write(
     symbol: str | None = None,
     signal_used: str | None = None,
     reasoning: str | None = None,
+    strategy: str | None = None,
 ) -> dict:
     """Append an entry to Jerry's persistent trade journal.
 
@@ -192,13 +193,19 @@ async def journal_write(
 
     Args:
         summary: One or two sentence summary of what this run found and did.
-        action: One of 'hold', 'stop_loss_sell', 'trailing_exit_sell',
-            'opened_call', 'opened_put', or 'no_action_no_cash'.
+        action: A short snake_case action id, e.g. 'hold', 'stop_loss_sell',
+            'trailing_exit_sell', 'opened_call', 'opened_put', 'no_action_no_cash',
+            or a strategy-specific action (e.g. 'closed_0dte_profit_target').
         symbol: Underlying ticker involved, if any.
         signal_used: What the put/call-ratio or unusual-activity signal showed,
             and whether it was used, skipped, or downweighted (e.g. for earnings).
         reasoning: Why this action was chosen over the alternatives — the part a
             future run most needs to inherit to actually improve over time.
+        strategy: Which strategy this entry belongs to, e.g. 'sofi_swing_options',
+            '0dte_scalper', 'momentum_equity'. Several independent strategies share
+            this account and this journal — tag every entry so a future run can
+            filter to the reasoning that's actually relevant to it instead of
+            drawing conclusions from a different strategy's trades.
     """
     entry = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -207,6 +214,7 @@ async def journal_write(
         "symbol": symbol,
         "signal_used": signal_used,
         "reasoning": reasoning,
+        "strategy": strategy,
     }
     async with httpx.AsyncClient() as client:
         await _upstash_pipeline(
@@ -220,7 +228,7 @@ async def journal_write(
 
 
 @mcp.tool()
-async def journal_read(limit: int = 20) -> dict:
+async def journal_read(limit: int = 20, strategy: str | None = None) -> dict:
     """Read Jerry's persistent trade journal — past runs' reasoning, not just fills.
 
     Call this at the start of every run, before deciding anything. This is the
@@ -228,11 +236,19 @@ async def journal_read(limit: int = 20) -> dict:
     the Robinhood trade ledger alone cannot show. Most recent entries last.
 
     Args:
-        limit: Max most-recent entries to return (default 20).
+        limit: Max most-recent entries to return (default 20), applied after
+            the strategy filter below.
+        strategy: If set, only return entries tagged with this strategy id
+            (see journal_write's strategy arg) — several independent strategies
+            share this journal, so filter to your own unless you deliberately
+            want the full cross-strategy history.
     """
     async with httpx.AsyncClient() as client:
-        (raw,) = await _upstash_pipeline(client, [["LRANGE", JOURNAL_KEY, str(-limit), "-1"]])
+        (raw,) = await _upstash_pipeline(client, [["LRANGE", JOURNAL_KEY, "0", "-1"]])
     entries = [json.loads(e) for e in (raw or [])]
+    if strategy is not None:
+        entries = [e for e in entries if e.get("strategy") == strategy]
+    entries = entries[-limit:]
     return {"count": len(entries), "entries": entries}
 
 
